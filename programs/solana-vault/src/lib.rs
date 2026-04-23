@@ -30,6 +30,19 @@ pub mod solana_vault {
         require!(!ctx.accounts.vault.paused, ErrorCode::VaultPaused);
         require!(amount > 0, ErrorCode::ZeroAmount);
 
+        let total_assets = ctx.accounts.treasury.amount;
+        let total_shares = ctx.accounts.share_mint.supply;
+
+        let shares_to_mint = if total_shares == 0 || total_assets == 0 {
+            amount
+        } else {
+            amount
+                .checked_mul(total_shares)
+                .ok_or(ErrorCode::MathOverflow)?
+                .checked_div(total_assets)
+                .ok_or(ErrorCode::MathOverflow)?
+        };
+
         let cpi_accounts = Transfer {
             from: ctx.accounts.user_token_account.to_account_info(),
             to: ctx.accounts.treasury.to_account_info(),
@@ -64,7 +77,7 @@ pub mod solana_vault {
             &bump_seed,
         );
 
-        token::mint_to(mint_to_ctx, amount)?;
+        token::mint_to(mint_to_ctx, shares_to_mint)?;
 
         Ok(())
     }

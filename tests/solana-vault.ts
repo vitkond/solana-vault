@@ -12,6 +12,7 @@ import {
     mintTo,
     TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
+import {BlockheightBasedTransactionConfirmationStrategy} from "@solana/web3.js";
 
 describe("solana-vault", () => {
     const provider = anchor.AnchorProvider.env();
@@ -170,6 +171,144 @@ describe("solana-vault", () => {
         expect(Number(userAccount.amount)).to.eq(600_000);
         expect(Number(treasuryAccount.amount)).to.eq(400_000);
         expect(Number(userShares.amount)).to.eq(400_000);
+    });
+
+    it("mints proportional shares on second deposit after yield", async () => {
+        const user2 = anchor.web3.Keypair.generate();
+
+        const sig = await provider.connection.requestAirdrop(
+            user2.publicKey,
+            2 * anchor.web3.LAMPORTS_PER_SOL
+        );
+        await provider.connection.confirmTransaction(sig);
+
+        const assetMint = await createMint(
+            provider.connection,
+            provider.wallet.payer,
+            provider.wallet.publicKey,
+            null,
+            6
+        );
+
+        const shareMint = anchor.web3.Keypair.generate();
+
+        const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("vault"), assetMint.toBuffer()],
+            program.programId
+        );
+
+        const treasuryAta = getAssociatedTokenAddressSync(
+            assetMint,
+            vaultPda,
+            true
+        );
+
+        await program.methods
+            .initialize()
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                admin: provider.wallet.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            })
+            .signers([shareMint])
+            .rpc();
+
+        const user1AssetAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey
+        );
+
+        const user1ShareAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            shareMint.publicKey,
+            provider.wallet.publicKey
+        );
+
+        const user2AssetAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            user2.publicKey
+        );
+
+        const user2ShareAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            shareMint.publicKey,
+            user2.publicKey
+        );
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            user1AssetAccount,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            user2AssetAccount,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        await program.methods
+            .deposit(new anchor.BN(1_000_000))
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                userTokenAccount: user1AssetAccount,
+                userShareAccount: user1ShareAccount,
+                user: provider.wallet.publicKey,
+                tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .rpc();
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            treasuryAta,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        await program.methods
+            .deposit(new anchor.BN(1_000_000))
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                userTokenAccount: user2AssetAccount,
+                userShareAccount: user2ShareAccount,
+                user: user2.publicKey,
+                tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .signers([user2])
+            .rpc();
+
+        const user1Shares = await getAccount(provider.connection, user1ShareAccount);
+        const user2Shares = await getAccount(provider.connection, user2ShareAccount);
+        const treasury = await getAccount(provider.connection, treasuryAta);
+
+        expect(Number(user1Shares.amount)).to.eq(1_000_000);
+        expect(Number(user2Shares.amount)).to.eq(500_000);
+        expect(Number(treasury.amount)).to.eq(3_000_000);
     });
 
     it("rejects deposit when vault is paused", async () => {

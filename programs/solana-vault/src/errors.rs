@@ -6,4 +6,6 @@ pub enum ErrorCode {
     ZeroAmount,
     #[msg("Vault is paused")]
     VaultPaused,
+    #[msg("Math overflow")]
+    MathOverflow,
 }
