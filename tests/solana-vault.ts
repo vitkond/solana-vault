@@ -12,7 +12,6 @@ import {
     mintTo,
     TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import {BlockheightBasedTransactionConfirmationStrategy} from "@solana/web3.js";
 
 describe("solana-vault", () => {
     const provider = anchor.AnchorProvider.env();
@@ -397,6 +396,449 @@ describe("solana-vault", () => {
         } catch (e: any) {
             const msg = e?.toString() ?? "";
             expect(msg).to.contain("Vault is paused");
+        }
+    });
+
+    it("withdraws proportional assets by burning shares", async () => {
+        const assetMint = await createMint(
+            provider.connection,
+            provider.wallet.payer,
+            provider.wallet.publicKey,
+            null,
+            6
+        );
+
+        const shareMint = anchor.web3.Keypair.generate();
+
+        const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("vault"), assetMint.toBuffer()],
+            program.programId
+        );
+
+        const treasuryAta = getAssociatedTokenAddressSync(
+            assetMint,
+            vaultPda,
+            true
+        );
+
+        await program.methods
+            .initialize()
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                admin: provider.wallet.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            })
+            .signers([shareMint])
+            .rpc();
+
+        const userAssetAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey
+        );
+
+        const userShareAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            shareMint.publicKey,
+            provider.wallet.publicKey
+        );
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            userAssetAccount,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        await program.methods
+            .deposit(new anchor.BN(1_000_000))
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                userTokenAccount: userAssetAccount,
+                userShareAccount,
+                user: provider.wallet.publicKey,
+                tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .rpc();
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            treasuryAta,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        await program.methods
+            .withdraw(new anchor.BN(500_000))
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                userTokenAccount: userAssetAccount,
+                userShareAccount,
+                user: provider.wallet.publicKey,
+                tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .rpc();
+
+        const userAsset = await getAccount(provider.connection, userAssetAccount);
+        const userShares = await getAccount(provider.connection, userShareAccount);
+        const treasury = await getAccount(provider.connection, treasuryAta);
+        const shareMintInfo = await getMint(provider.connection, shareMint.publicKey);
+
+        expect(Number(userAsset.amount)).to.eq(1_000_000);
+        expect(Number(userShares.amount)).to.eq(500_000);
+        expect(Number(treasury.amount)).to.eq(1_000_000);
+        expect(Number(shareMintInfo.supply)).to.eq(500_000);
+    });
+
+    it("rejects deposit when minted shares would be zero", async () => {
+        const user2 = anchor.web3.Keypair.generate();
+
+        const sig = await provider.connection.requestAirdrop(
+            user2.publicKey,
+            2 * anchor.web3.LAMPORTS_PER_SOL
+        );
+        await provider.connection.confirmTransaction(sig);
+
+        const assetMint = await createMint(
+            provider.connection,
+            provider.wallet.payer,
+            provider.wallet.publicKey,
+            null,
+            6
+        );
+
+        const shareMint = anchor.web3.Keypair.generate();
+
+        const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("vault"), assetMint.toBuffer()],
+            program.programId
+        );
+
+        const treasuryAta = getAssociatedTokenAddressSync(assetMint, vaultPda, true);
+
+        await program.methods
+            .initialize()
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                admin: provider.wallet.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            })
+            .signers([shareMint])
+            .rpc();
+
+        const user1AssetAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey
+        );
+
+        const user1ShareAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            shareMint.publicKey,
+            provider.wallet.publicKey
+        );
+
+        const user2AssetAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            user2.publicKey
+        );
+
+        const user2ShareAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            shareMint.publicKey,
+            user2.publicKey
+        );
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            user1AssetAccount,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            user2AssetAccount,
+            provider.wallet.publicKey,
+            1
+        );
+
+        await program.methods
+            .deposit(new anchor.BN(1_000_000))
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                userTokenAccount: user1AssetAccount,
+                userShareAccount: user1ShareAccount,
+                user: provider.wallet.publicKey,
+                tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .rpc();
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            treasuryAta,
+            provider.wallet.publicKey,
+            999_000_000
+        );
+
+        try {
+            await program.methods
+                .deposit(new anchor.BN(1))
+                .accountsPartial({
+                    vault: vaultPda,
+                    assetMint,
+                    shareMint: shareMint.publicKey,
+                    treasury: treasuryAta,
+                    userTokenAccount: user2AssetAccount,
+                    userShareAccount: user2ShareAccount,
+                    user: user2.publicKey,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                })
+                .signers([user2])
+                .rpc();
+
+            expect.fail("deposit should have failed");
+        } catch (e: any) {
+            expect(e.toString()).to.contain("Shares would be zero");
+        }
+    });
+
+    // it("rejects withdraw when returned assets would be zero", async () => {
+    //     const assetMint = await createMint(
+    //         provider.connection,
+    //         provider.wallet.payer,
+    //         provider.wallet.publicKey,
+    //         null,
+    //         6
+    //     );
+    //
+    //     const shareMint = anchor.web3.Keypair.generate();
+    //
+    //     const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+    //         [Buffer.from("vault"), assetMint.toBuffer()],
+    //         program.programId
+    //     );
+    //
+    //     const treasuryAta = getAssociatedTokenAddressSync(assetMint, vaultPda, true);
+    //
+    //     await program.methods
+    //         .initialize()
+    //         .accountsPartial({
+    //             vault: vaultPda,
+    //             assetMint,
+    //             shareMint: shareMint.publicKey,
+    //             treasury: treasuryAta,
+    //             admin: provider.wallet.publicKey,
+    //             systemProgram: anchor.web3.SystemProgram.programId,
+    //             tokenProgram: TOKEN_PROGRAM_ID,
+    //             associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+    //         })
+    //         .signers([shareMint])
+    //         .rpc();
+    //
+    //     const userAssetAccount = await createAssociatedTokenAccount(
+    //         provider.connection,
+    //         provider.wallet.payer,
+    //         assetMint,
+    //         provider.wallet.publicKey
+    //     );
+    //
+    //     const userShareAccount = await createAssociatedTokenAccount(
+    //         provider.connection,
+    //         provider.wallet.payer,
+    //         shareMint.publicKey,
+    //         provider.wallet.publicKey
+    //     );
+    //
+    //     await mintTo(
+    //         provider.connection,
+    //         provider.wallet.payer,
+    //         assetMint,
+    //         userAssetAccount,
+    //         provider.wallet.publicKey,
+    //         1_000_000
+    //     );
+    //
+    //     await program.methods
+    //         .deposit(new anchor.BN(1_000_000))
+    //         .accountsPartial({
+    //             vault: vaultPda,
+    //             assetMint,
+    //             shareMint: shareMint.publicKey,
+    //             treasury: treasuryAta,
+    //             userTokenAccount: userAssetAccount,
+    //             userShareAccount,
+    //             user: provider.wallet.publicKey,
+    //             tokenProgram: TOKEN_PROGRAM_ID,
+    //         })
+    //         .rpc();
+    //
+    //     // Make shares >> assets
+    //     // reduce assets relative to shares
+    //     // burn almost everything, but leave a tiny bit
+    //
+    //     await program.methods
+    //         .withdraw(new anchor.BN(999_999))
+    //         .accountsPartial({
+    //             vault: vaultPda,
+    //             assetMint,
+    //             shareMint: shareMint.publicKey,
+    //             treasury: treasuryAta,
+    //             userTokenAccount: userAssetAccount,
+    //             userShareAccount,
+    //             user: provider.wallet.publicKey,
+    //             tokenProgram: TOKEN_PROGRAM_ID,
+    //         })
+    //         .rpc();
+    //
+    //     // now what remains:
+    //     // shares ~ 1
+    //     // assets ~ 1_000_000 - something
+    //     // simulate yield in reverse: logically reduce assets through a new scenario
+    //
+    //     // simpler: try withdrawing 1 share -> it should return 0
+    //
+    //     try {
+    //         await program.methods
+    //             .withdraw(new anchor.BN(1))
+    //             .accountsPartial({
+    //                 vault: vaultPda,
+    //                 assetMint,
+    //                 shareMint: shareMint.publicKey,
+    //                 treasury: treasuryAta,
+    //                 userTokenAccount: userAssetAccount,
+    //                 userShareAccount,
+    //                 user: provider.wallet.publicKey,
+    //                 tokenProgram: TOKEN_PROGRAM_ID,
+    //             })
+    //             .rpc();
+    //
+    //         expect.fail("withdraw should have failed");
+    //     } catch (e: any) {
+    //         console.error("Error", e);
+    //         expect(e.toString()).to.contain("Assets would be zero");
+    //     }
+    // });
+
+    it("rejects deposit from token account not owned by signer", async () => {
+        const attacker = anchor.web3.Keypair.generate();
+
+        const sig = await provider.connection.requestAirdrop(
+            attacker.publicKey,
+            2 * anchor.web3.LAMPORTS_PER_SOL
+        );
+        await provider.connection.confirmTransaction(sig);
+
+        const assetMint = await createMint(
+            provider.connection,
+            provider.wallet.payer,
+            provider.wallet.publicKey,
+            null,
+            6
+        );
+
+        const shareMint = anchor.web3.Keypair.generate();
+
+        const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("vault"), assetMint.toBuffer()],
+            program.programId
+        );
+
+        const treasuryAta = getAssociatedTokenAddressSync(assetMint, vaultPda, true);
+
+        await program.methods
+            .initialize()
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                admin: provider.wallet.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            })
+            .signers([shareMint])
+            .rpc();
+
+        const victimTokenAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey
+        );
+
+        const attackerShareAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            shareMint.publicKey,
+            attacker.publicKey
+        );
+
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            victimTokenAccount,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        try {
+            await program.methods
+                .deposit(new anchor.BN(100_000))
+                .accountsPartial({
+                    vault: vaultPda,
+                    assetMint,
+                    shareMint: shareMint.publicKey,
+                    treasury: treasuryAta,
+                    userTokenAccount: victimTokenAccount,
+                    userShareAccount: attackerShareAccount,
+                    user: attacker.publicKey,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                })
+                .signers([attacker])
+                .rpc();
+
+            expect.fail("deposit should have failed");
+        } catch (e: any) {
+            expect(e.toString()).to.contain("A raw constraint was violated");
         }
     });
 });

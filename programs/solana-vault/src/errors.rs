@@ -8,4 +8,8 @@ pub enum ErrorCode {
     VaultPaused,
     #[msg("Math overflow")]
     MathOverflow,
+    #[msg("Shares would be zero")]
+    ZeroShares,
+    #[msg("Assets would be zero")]
+    ZeroAssets,
 }
