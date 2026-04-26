@@ -22,6 +22,9 @@ pub mod solana_vault {
         vault.paused = false;
         vault.share_mint = ctx.accounts.share_mint.key();
 
+        vault.fee_bps = 100;
+        vault.fee_recipient = ctx.accounts.admin.key();
+
         msg!("vault initialized");
         Ok(())
     }
@@ -33,10 +36,22 @@ pub mod solana_vault {
         let total_assets = ctx.accounts.treasury.amount;
         let total_shares = ctx.accounts.share_mint.supply;
 
+        let fee_amount = amount
+            .checked_mul(ctx.accounts.vault.fee_bps as u64)
+            .ok_or(ErrorCode::MathOverflow)?
+            .checked_div(10_000)
+            .ok_or(ErrorCode::MathOverflow)?;
+
+        let net_amount = amount
+            .checked_sub(fee_amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+
+        require!(net_amount > 0, ErrorCode::ZeroAmount);
+
         let shares_to_mint = if total_shares == 0 || total_assets == 0 {
-            amount
+            net_amount
         } else {
-            amount
+            net_amount
                 .checked_mul(total_shares)
                 .ok_or(ErrorCode::MathOverflow)?
                 .checked_div(total_assets)
@@ -51,12 +66,27 @@ pub mod solana_vault {
             authority: ctx.accounts.user.to_account_info(),
         };
 
-        let cpi_ctx = CpiContext::new(
+        let transfer_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             cpi_accounts,
         );
 
-        token::transfer(cpi_ctx, amount)?;
+        token::transfer(transfer_ctx, net_amount)?;
+
+        if fee_amount > 0 {
+            let fee_transfer_accounts = Transfer {
+                from: ctx.accounts.user_token_account.to_account_info(),
+                to: ctx.accounts.fee_recipient_token_account.to_account_info(),
+                authority: ctx.accounts.user.to_account_info(),
+            };
+
+            let fee_transfer_ctx = CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                fee_transfer_accounts,
+            );
+
+            token::transfer(fee_transfer_ctx, fee_amount)?;
+        }
 
         let asset_mintkey = ctx.accounts.asset_mint.key();
 
@@ -143,6 +173,15 @@ pub mod solana_vault {
         vault.paused = paused;
         Ok(())
     }
+
+    pub fn set_fee_bps(ctx: Context<SetFeeBps>, fee_bps: u16) -> Result<()> {
+        require!(fee_bps <= 1_000, ErrorCode::FeeTooHigh);
+
+        let vault = &mut ctx.accounts.vault;
+        vault.fee_bps = fee_bps;
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -190,6 +229,8 @@ pub struct Vault {
     pub share_mint: Pubkey,
     pub bump: u8,
     pub paused: bool,
+    pub fee_bps: u16,
+    pub fee_recipient: Pubkey,
 }
 
 #[derive(Accounts)]
@@ -230,6 +271,13 @@ pub struct Deposit<'info> {
     address = vault.share_mint
     )]
     pub share_mint: Account<'info, Mint>,
+
+    #[account(
+    mut,
+    constraint = fee_recipient_token_account.mint == asset_mint.key(),
+    constraint = fee_recipient_token_account.owner == vault.fee_recipient
+    )]
+    pub fee_recipient_token_account: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -289,3 +337,17 @@ pub struct SetPaused<'info> {
 
     pub admin: Signer<'info>,
 }
+
+#[derive(Accounts)]
+pub struct SetFeeBps<'info> {
+    #[account(
+        mut,
+        seeds = [b"vault", vault.asset_mint.as_ref()],
+        bump = vault.bump,
+        has_one = admin
+    )]
+    pub vault: Account<'info, Vault>,
+
+    pub admin: Signer<'info>,
+}
+

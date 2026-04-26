@@ -12,4 +12,6 @@ pub enum ErrorCode {
     ZeroShares,
     #[msg("Assets would be zero")]
     ZeroAssets,
+    #[msg("Fee is too high")]
+    FeeTooHigh,
 }

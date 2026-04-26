@@ -105,6 +105,15 @@ describe("solana-vault", () => {
             program.programId
         );
 
+        // Create user wallet for tests
+        const user = anchor.web3.Keypair.generate();
+        await provider.connection.confirmTransaction(
+            await provider.connection.requestAirdrop(
+                user.publicKey,
+                2 * anchor.web3.LAMPORTS_PER_SOL
+            )
+        );
+
         const treasuryAta = getAssociatedTokenAddressSync(
             assetMint,
             vaultPda,
@@ -126,11 +135,20 @@ describe("solana-vault", () => {
             .signers([shareMint])
             .rpc();
 
+
+        const feeRecipientTokenAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey // admin receives fee
+        );
+
+
         const userTokenAccount = await createAssociatedTokenAccount(
             provider.connection,
             provider.wallet.payer,
             assetMint,
-            provider.wallet.publicKey
+            user.publicKey // user makes deposit
         );
 
         await mintTo(
@@ -146,7 +164,7 @@ describe("solana-vault", () => {
             provider.connection,
             provider.wallet.payer,
             shareMint.publicKey,
-            provider.wallet.publicKey
+            user.publicKey,
         );
 
         await program.methods
@@ -156,11 +174,13 @@ describe("solana-vault", () => {
                 assetMint,
                 treasury: treasuryAta,
                 shareMint: shareMint.publicKey,
+                feeRecipientTokenAccount,
                 userTokenAccount,
                 userShareAccount,
-                user: provider.wallet.publicKey,
+                user: user.publicKey,
                 tokenProgram: TOKEN_PROGRAM_ID,
             })
+            .signers([user])
             .rpc();
 
         const userAccount = await getAccount(provider.connection, userTokenAccount);
@@ -168,18 +188,25 @@ describe("solana-vault", () => {
         const userShares = await getAccount(provider.connection, userShareAccount);
 
         expect(Number(userAccount.amount)).to.eq(600_000);
-        expect(Number(treasuryAccount.amount)).to.eq(400_000);
-        expect(Number(userShares.amount)).to.eq(400_000);
+        expect(Number(treasuryAccount.amount)).to.eq(396_000);
+        expect(Number(userShares.amount)).to.eq(396_000);
     });
 
     it("mints proportional shares on second deposit after yield", async () => {
+        const user1 = anchor.web3.Keypair.generate();
         const user2 = anchor.web3.Keypair.generate();
 
-        const sig = await provider.connection.requestAirdrop(
+        const user1_wallet = await provider.connection.requestAirdrop(
+            user1.publicKey,
+            2 * anchor.web3.LAMPORTS_PER_SOL
+        );
+
+        const user2_wallet = await provider.connection.requestAirdrop(
             user2.publicKey,
             2 * anchor.web3.LAMPORTS_PER_SOL
         );
-        await provider.connection.confirmTransaction(sig);
+        await provider.connection.confirmTransaction(user1_wallet);
+        await provider.connection.confirmTransaction(user2_wallet);
 
         const assetMint = await createMint(
             provider.connection,
@@ -221,14 +248,14 @@ describe("solana-vault", () => {
             provider.connection,
             provider.wallet.payer,
             assetMint,
-            provider.wallet.publicKey
+            user1.publicKey
         );
 
         const user1ShareAccount = await createAssociatedTokenAccount(
             provider.connection,
             provider.wallet.payer,
             shareMint.publicKey,
-            provider.wallet.publicKey
+            user1.publicKey
         );
 
         const user2AssetAccount = await createAssociatedTokenAccount(
@@ -263,6 +290,13 @@ describe("solana-vault", () => {
             1_000_000
         );
 
+        const feeRecipientTokenAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey // admin receives fee
+        );
+
         await program.methods
             .deposit(new anchor.BN(1_000_000))
             .accountsPartial({
@@ -272,9 +306,11 @@ describe("solana-vault", () => {
                 treasury: treasuryAta,
                 userTokenAccount: user1AssetAccount,
                 userShareAccount: user1ShareAccount,
-                user: provider.wallet.publicKey,
+                feeRecipientTokenAccount,
+                user: user1.publicKey,
                 tokenProgram: TOKEN_PROGRAM_ID,
             })
+            .signers([user1])
             .rpc();
 
         await mintTo(
@@ -295,6 +331,7 @@ describe("solana-vault", () => {
                 treasury: treasuryAta,
                 userTokenAccount: user2AssetAccount,
                 userShareAccount: user2ShareAccount,
+                feeRecipientTokenAccount,
                 user: user2.publicKey,
                 tokenProgram: TOKEN_PROGRAM_ID,
             })
@@ -305,9 +342,9 @@ describe("solana-vault", () => {
         const user2Shares = await getAccount(provider.connection, user2ShareAccount);
         const treasury = await getAccount(provider.connection, treasuryAta);
 
-        expect(Number(user1Shares.amount)).to.eq(1_000_000);
-        expect(Number(user2Shares.amount)).to.eq(500_000);
-        expect(Number(treasury.amount)).to.eq(3_000_000);
+        expect(Number(user1Shares.amount)).to.eq(990_000);
+        expect(Number(user2Shares.amount)).to.eq(492_512);
+        expect(Number(treasury.amount)).to.eq(2_980_000);
     });
 
     it("rejects deposit when vault is paused", async () => {
@@ -317,6 +354,15 @@ describe("solana-vault", () => {
             provider.wallet.publicKey,
             null,
             6
+        );
+
+
+        const user = anchor.web3.Keypair.generate();
+        await provider.connection.confirmTransaction(
+            await provider.connection.requestAirdrop(
+                user.publicKey,
+                anchor.web3.LAMPORTS_PER_SOL
+            )
         );
 
         const shareMint = anchor.web3.Keypair.generate();
@@ -351,8 +397,10 @@ describe("solana-vault", () => {
             provider.connection,
             provider.wallet.payer,
             assetMint,
-            provider.wallet.publicKey
+            user.publicKey,
         );
+
+        console.log("Before minting");
 
         await mintTo(
             provider.connection,
@@ -362,6 +410,8 @@ describe("solana-vault", () => {
             provider.wallet.publicKey,
             1_000_000
         );
+
+        console.log("Minted to user account")
 
         await program.methods
             .setPaused(true)
@@ -376,8 +426,16 @@ describe("solana-vault", () => {
                 provider.connection,
                 provider.wallet.payer,
                 shareMint.publicKey,
-                provider.wallet.publicKey
+                user.publicKey,
             );
+            console.log("Created user share");
+            const feeRecipientTokenAccount =  await createAssociatedTokenAccount(
+                provider.connection,
+                provider.wallet.payer,
+                assetMint,
+                provider.wallet.publicKey // admin receives fee
+            );
+            console.log("Making a deposit")
             await program.methods
                 .deposit(new anchor.BN(400_000))
                 .accountsPartial({
@@ -386,10 +444,12 @@ describe("solana-vault", () => {
                     treasury: treasuryAta,
                     userTokenAccount,
                     userShareAccount,
+                    feeRecipientTokenAccount,
                     shareMint: shareMint.publicKey.toBase58(),
-                    user: provider.wallet.publicKey,
+                    user: user.publicKey,
                     tokenProgram: TOKEN_PROGRAM_ID,
                 })
+                .signers([user])
                 .rpc();
 
             expect.fail("deposit should have failed");
@@ -406,6 +466,14 @@ describe("solana-vault", () => {
             provider.wallet.publicKey,
             null,
             6
+        );
+
+        const user = anchor.web3.Keypair.generate();
+        await provider.connection.confirmTransaction(
+            await provider.connection.requestAirdrop(
+                user.publicKey,
+                anchor.web3.LAMPORTS_PER_SOL
+            )
         );
 
         const shareMint = anchor.web3.Keypair.generate();
@@ -440,16 +508,17 @@ describe("solana-vault", () => {
             provider.connection,
             provider.wallet.payer,
             assetMint,
-            provider.wallet.publicKey
+            user.publicKey,
         );
 
         const userShareAccount = await createAssociatedTokenAccount(
             provider.connection,
             provider.wallet.payer,
             shareMint.publicKey,
-            provider.wallet.publicKey
+            user.publicKey,
         );
 
+        console.log("Before minting");
         await mintTo(
             provider.connection,
             provider.wallet.payer,
@@ -457,6 +526,13 @@ describe("solana-vault", () => {
             userAssetAccount,
             provider.wallet.publicKey,
             1_000_000
+        );
+
+        const feeRecipientTokenAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey // admin receives fee
         );
 
         await program.methods
@@ -467,12 +543,15 @@ describe("solana-vault", () => {
                 shareMint: shareMint.publicKey,
                 treasury: treasuryAta,
                 userTokenAccount: userAssetAccount,
+                feeRecipientTokenAccount,
                 userShareAccount,
-                user: provider.wallet.publicKey,
+                user: user.publicKey,
                 tokenProgram: TOKEN_PROGRAM_ID,
             })
+            .signers([user])
             .rpc();
 
+        // donate some lamps to account
         await mintTo(
             provider.connection,
             provider.wallet.payer,
@@ -482,8 +561,9 @@ describe("solana-vault", () => {
             1_000_000
         );
 
+        console.log("Withdraw");
         await program.methods
-            .withdraw(new anchor.BN(500_000))
+            .withdraw(new anchor.BN(495_000))
             .accountsPartial({
                 vault: vaultPda,
                 assetMint,
@@ -491,9 +571,10 @@ describe("solana-vault", () => {
                 treasury: treasuryAta,
                 userTokenAccount: userAssetAccount,
                 userShareAccount,
-                user: provider.wallet.publicKey,
+                user: user.publicKey,
                 tokenProgram: TOKEN_PROGRAM_ID,
             })
+            .signers([user])
             .rpc();
 
         const userAsset = await getAccount(provider.connection, userAssetAccount);
@@ -501,20 +582,26 @@ describe("solana-vault", () => {
         const treasury = await getAccount(provider.connection, treasuryAta);
         const shareMintInfo = await getMint(provider.connection, shareMint.publicKey);
 
-        expect(Number(userAsset.amount)).to.eq(1_000_000);
-        expect(Number(userShares.amount)).to.eq(500_000);
-        expect(Number(treasury.amount)).to.eq(1_000_000);
-        expect(Number(shareMintInfo.supply)).to.eq(500_000);
+        expect(Number(userAsset.amount)).to.eq(995_000);
+        expect(Number(userShares.amount)).to.eq(495_000);
+        expect(Number(treasury.amount)).to.eq(995_000);
+        expect(Number(shareMintInfo.supply)).to.eq(495_000);
     });
 
     it("rejects deposit when minted shares would be zero", async () => {
+        const user1 = anchor.web3.Keypair.generate();
         const user2 = anchor.web3.Keypair.generate();
 
-        const sig = await provider.connection.requestAirdrop(
-            user2.publicKey,
-            2 * anchor.web3.LAMPORTS_PER_SOL
+        const sig1 = await provider.connection.requestAirdrop(
+            user1.publicKey,
+            anchor.web3.LAMPORTS_PER_SOL
         );
-        await provider.connection.confirmTransaction(sig);
+        const sig2 = await provider.connection.requestAirdrop(
+            user2.publicKey,
+            anchor.web3.LAMPORTS_PER_SOL
+        );
+        await provider.connection.confirmTransaction(sig1);
+        await provider.connection.confirmTransaction(sig2);
 
         const assetMint = await createMint(
             provider.connection,
@@ -552,14 +639,14 @@ describe("solana-vault", () => {
             provider.connection,
             provider.wallet.payer,
             assetMint,
-            provider.wallet.publicKey
+            user1.publicKey,
         );
 
         const user1ShareAccount = await createAssociatedTokenAccount(
             provider.connection,
             provider.wallet.payer,
             shareMint.publicKey,
-            provider.wallet.publicKey
+            user1.publicKey,
         );
 
         const user2AssetAccount = await createAssociatedTokenAccount(
@@ -594,6 +681,14 @@ describe("solana-vault", () => {
             1
         );
 
+        const feeRecipientTokenAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey // admin receives fee
+        );
+
+        console.log("User1 trying to deposit")
         await program.methods
             .deposit(new anchor.BN(1_000_000))
             .accountsPartial({
@@ -603,10 +698,13 @@ describe("solana-vault", () => {
                 treasury: treasuryAta,
                 userTokenAccount: user1AssetAccount,
                 userShareAccount: user1ShareAccount,
-                user: provider.wallet.publicKey,
+                feeRecipientTokenAccount: feeRecipientTokenAccount,
+                user: user1.publicKey,
                 tokenProgram: TOKEN_PROGRAM_ID,
             })
+            .signers([user1])
             .rpc();
+        console.log("User 1 deposited 1_000_000");
 
         await mintTo(
             provider.connection,
@@ -627,6 +725,7 @@ describe("solana-vault", () => {
                     treasury: treasuryAta,
                     userTokenAccount: user2AssetAccount,
                     userShareAccount: user2ShareAccount,
+                    feeRecipientTokenAccount,
                     user: user2.publicKey,
                     tokenProgram: TOKEN_PROGRAM_ID,
                 })
@@ -758,9 +857,210 @@ describe("solana-vault", () => {
 
     it("rejects deposit from token account not owned by signer", async () => {
         const attacker = anchor.web3.Keypair.generate();
+        const victim = anchor.web3.Keypair.generate();
+
+        const sigAttacker = await provider.connection.requestAirdrop(
+            attacker.publicKey,
+            anchor.web3.LAMPORTS_PER_SOL
+        );
+        await provider.connection.confirmTransaction(sigAttacker);
+
+        const sigVictim = await provider.connection.requestAirdrop(
+            victim.publicKey,
+            anchor.web3.LAMPORTS_PER_SOL
+        );
+        await provider.connection.confirmTransaction(sigVictim);
+
+
+        const assetMint = await createMint(
+            provider.connection,
+            provider.wallet.payer,
+            provider.wallet.publicKey,
+            null,
+            6
+        );
+
+        const shareMint = anchor.web3.Keypair.generate();
+
+        const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("vault"), assetMint.toBuffer()],
+            program.programId
+        );
+
+        const treasuryAta = getAssociatedTokenAddressSync(assetMint, vaultPda, true);
+
+        await program.methods
+            .initialize()
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                admin: provider.wallet.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            })
+            .signers([shareMint])
+            .rpc();
+
+        console.log("Creating victim token account");
+        const victimTokenAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            victim.publicKey,
+        );
+
+        console.log("Creating attacker share account");
+        const attackerShareAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            shareMint.publicKey,
+            attacker.publicKey
+        );
+
+        console.log("Minting money to victim token account");
+        await mintTo(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            victimTokenAccount,
+            provider.wallet.publicKey,
+            1_000_000
+        );
+
+        console.log("Creating fee recipient token account");
+        const feeRecipientTokenAccount = await createAssociatedTokenAccount(
+            provider.connection,
+            provider.wallet.payer,
+            assetMint,
+            provider.wallet.publicKey // admin receives fee
+        );
+
+        console.log("User1 trying to deposit with attacker token");
+        try {
+            await program.methods
+                .deposit(new anchor.BN(100_000))
+                .accountsPartial({
+                    vault: vaultPda,
+                    assetMint,
+                    shareMint: shareMint.publicKey,
+                    treasury: treasuryAta,
+                    userTokenAccount: victimTokenAccount,
+                    userShareAccount: attackerShareAccount,
+                    feeRecipientTokenAccount,
+                    user: attacker.publicKey,
+                    tokenProgram: TOKEN_PROGRAM_ID,
+                })
+                .signers([attacker])
+                .rpc();
+
+            expect.fail("deposit should have failed");
+        } catch (e: any) {
+            expect(e.toString()).to.contain("A raw constraint was violated");
+        }
+    });
+
+    it("allows admin to update fee bps", async () => {
+        const assetMint = await createMint(
+            provider.connection,
+            provider.wallet.payer,
+            provider.wallet.publicKey,
+            null,
+            6
+        );
+
+        const shareMint = anchor.web3.Keypair.generate();
+
+        const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("vault"), assetMint.toBuffer()],
+            program.programId
+        );
+
+        const treasuryAta = getAssociatedTokenAddressSync(assetMint, vaultPda, true);
+
+        await program.methods
+            .initialize()
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                admin: provider.wallet.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            })
+            .signers([shareMint])
+            .rpc();
+
+        await program.methods
+            .setFeeBps(250)
+            .accountsPartial({
+                vault: vaultPda,
+                admin: provider.wallet.publicKey,
+            })
+            .rpc();
+
+        const vault = await program.account.vault.fetch(vaultPda);
+
+        expect(vault.feeBps).to.eq(250);
+    });
+
+    it("rejects fee bps above limit", async () => {
+        const assetMint = await createMint(
+            provider.connection,
+            provider.wallet.payer,
+            provider.wallet.publicKey,
+            null,
+            6
+        );
+
+        const shareMint = anchor.web3.Keypair.generate();
+
+        const [vaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("vault"), assetMint.toBuffer()],
+            program.programId
+        );
+
+        const treasuryAta = getAssociatedTokenAddressSync(assetMint, vaultPda, true);
+
+        await program.methods
+            .initialize()
+            .accountsPartial({
+                vault: vaultPda,
+                assetMint,
+                shareMint: shareMint.publicKey,
+                treasury: treasuryAta,
+                admin: provider.wallet.publicKey,
+                systemProgram: anchor.web3.SystemProgram.programId,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            })
+            .signers([shareMint])
+            .rpc();
+
+        try {
+            await program.methods
+                .setFeeBps(1_001)
+                .accountsPartial({
+                    vault: vaultPda,
+                    admin: provider.wallet.publicKey,
+                })
+                .rpc();
+
+            expect.fail("setFeeBps should have failed");
+        } catch (e: any) {
+            expect(e.toString()).to.contain("Fee is too high");
+        }
+    });
+
+    it("rejects fee update from non-admin", async () => {
+        const nonAdmin = anchor.web3.Keypair.generate();
 
         const sig = await provider.connection.requestAirdrop(
-            attacker.publicKey,
+            nonAdmin.publicKey,
             2 * anchor.web3.LAMPORTS_PER_SOL
         );
         await provider.connection.confirmTransaction(sig);
@@ -797,48 +1097,19 @@ describe("solana-vault", () => {
             .signers([shareMint])
             .rpc();
 
-        const victimTokenAccount = await createAssociatedTokenAccount(
-            provider.connection,
-            provider.wallet.payer,
-            assetMint,
-            provider.wallet.publicKey
-        );
-
-        const attackerShareAccount = await createAssociatedTokenAccount(
-            provider.connection,
-            provider.wallet.payer,
-            shareMint.publicKey,
-            attacker.publicKey
-        );
-
-        await mintTo(
-            provider.connection,
-            provider.wallet.payer,
-            assetMint,
-            victimTokenAccount,
-            provider.wallet.publicKey,
-            1_000_000
-        );
-
         try {
             await program.methods
-                .deposit(new anchor.BN(100_000))
+                .setFeeBps(250)
                 .accountsPartial({
                     vault: vaultPda,
-                    assetMint,
-                    shareMint: shareMint.publicKey,
-                    treasury: treasuryAta,
-                    userTokenAccount: victimTokenAccount,
-                    userShareAccount: attackerShareAccount,
-                    user: attacker.publicKey,
-                    tokenProgram: TOKEN_PROGRAM_ID,
+                    admin: nonAdmin.publicKey,
                 })
-                .signers([attacker])
+                .signers([nonAdmin])
                 .rpc();
 
-            expect.fail("deposit should have failed");
+            expect.fail("setFeeBps should have failed");
         } catch (e: any) {
-            expect(e.toString()).to.contain("A raw constraint was violated");
+            expect(e.toString()).to.contain("ConstraintHasOne");
         }
     });
 });
