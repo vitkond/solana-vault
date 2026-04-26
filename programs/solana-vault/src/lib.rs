@@ -182,6 +182,15 @@ pub mod solana_vault {
 
         Ok(())
     }
+
+    pub fn set_fee_recipient(
+        ctx: Context<SetFeeRecipient>,
+        fee_recipient: Pubkey,
+    ) -> Result<()> {
+        let vault = &mut ctx.accounts.vault;
+        vault.fee_recipient = fee_recipient;
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -340,6 +349,19 @@ pub struct SetPaused<'info> {
 
 #[derive(Accounts)]
 pub struct SetFeeBps<'info> {
+    #[account(
+        mut,
+        seeds = [b"vault", vault.asset_mint.as_ref()],
+        bump = vault.bump,
+        has_one = admin
+    )]
+    pub vault: Account<'info, Vault>,
+
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct SetFeeRecipient<'info> {
     #[account(
         mut,
         seeds = [b"vault", vault.asset_mint.as_ref()],
